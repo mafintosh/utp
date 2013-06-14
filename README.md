@@ -1,6 +1,6 @@
 # utp
 
-A utp implementation in Javascript.
+utp (micro transport protocol) implementation in node.
 It is available through npm
 
 	npm install utp
