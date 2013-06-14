@@ -1,0 +1,12 @@
+ 0.1.0:
+ ☐ export uint casts to sep module
+ ☐ uint overflow safety
+ ☐ closing using FIN
+ ☐ data packet spliting
+ ☐ keep-alive / timeouts
+ ☐ meassuring window
+
+ investigations:
+ ☐ naggle algorithm
+ ☐ selective ack
+ ☐ delayed ack
