@@ -34,7 +34,7 @@ var bufferToPacket = function(buffer) {
 	var packet = {};
 	packet.id = buffer[0] & ST_MASK;
 	packet.connection = buffer.readUInt16BE(2);
-	packet.time = buffer.readUInt32BE(4);
+	packet.timestamp = buffer.readUInt32BE(4);
 	packet.timediff = buffer.readUInt32BE(8);
 	packet.window = buffer.readUInt32BE(12);
 	packet.seq = buffer.readUInt16BE(16);
@@ -48,7 +48,7 @@ var packetToBuffer = function(packet) {
 	buffer[0] = packet.id | VERSION;
 	buffer[1] = EXTENSION;
 	buffer.writeUInt16BE(packet.connection, 2);
-	buffer.writeUInt32BE(timestamp(), 4);
+	buffer.writeUInt32BE(packet.timestamp, 4);
 	buffer.writeUInt32BE(packet.timediff, 8);
 	buffer.writeUInt32BE(packet.window, 12);
 	buffer.writeUInt16BE(packet.seq, 16);
