@@ -151,8 +151,7 @@ Connection.prototype._checkTimeout = function() {
 		if (uint32(now - packet.timesent) < this._inflightTimeout) continue;
 		packet.timesent = now;
 		this._send(packet);
-
-		console.error('[DEBUG] resend '+packet.seq+' '+packet.id);
+		this.emit('packetresend', packet);
 	}
 };
 
