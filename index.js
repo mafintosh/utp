@@ -175,12 +175,12 @@ Connection.prototype._packet = function(id, connection, data, callback) {
 
 Connection.prototype._onsynsent = function(packet) { // when we receive a packet
 	if (packet.id !== ST_STATE) return this._incoming.put(packet.seq, packet);
+	this.emit('connect');
 	this.ack = packet.seq;
 	this._seqAcked = packet.ack-1;
 	this._write = this._writeData;
 	this._recvPacket = this._onconnected;
 	this._recvAck(packet.ack);
-	this.emit('connect');
 	while (this._stack.length) this._writeData.apply(this, this._stack.shift());
 	packet = this._incoming.del(this.ack+1);
 	if (packet) this._recvPacket(packet);
