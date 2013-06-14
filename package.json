@@ -1,0 +1,19 @@
+{
+  "name": "utp",
+  "version": "0.0.1",
+  "repository": "git://github.com/mafintosh/utp",
+  "description": "utp (micro transport protocol) implementation in node",
+  "dependencies": {
+    "circular": "~0.1.0"
+  },
+  "keywords": [
+    "utp",
+    "micro",
+    "transport",
+    "protocol",
+    "stream",
+    "p2p",
+    "udp"
+  ],
+  "author": "Mathias Buus Madsen <mathiasbuus@gmail.com>"
+}
