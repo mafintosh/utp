@@ -16,8 +16,14 @@ var ST_STATE = 2 << 4;
 var ST_RESET = 3 << 4;
 var ST_SYN   = 4 << 4;
 
+var DEFAULT_WINDOW_SIZE = 1 << 18;
+
 var uint32 = function(n) {
 	return n >>> 0;
+};
+
+var uint16 = function(n) {
+	return n & UINT16;
 };
 
 var timestamp = function() {
@@ -67,7 +73,7 @@ var Connection = function(port, host, socket, syn) {
 
 	this._outgoing = cyclist(64);
 	this._incoming = cyclist(64);
-	this._inflight = 0;
+	this._inflightPackets = 0;
 	this._inflightTimeout = 500000;
 	this._stack = [];
 
@@ -117,11 +123,11 @@ Connection.prototype._writeData = function(data, enc, callback) { // TODO: check
 // utp stuff
 
 Connection.prototype._recvAck = function(seq) { // when we receive an ack
-	var prevAcked = this.seq - this._inflight - 1; // last packet that was acked
-	var acks = seq - prevAcked;
+	var prevAcked = this.seq - this._inflightPackets - 1; // last packet that was acked
+	var acks = seq - prevAcked; // amount of acks we just recv
 
 	for (var i = 0; i < acks; i++) {
-		this._inflight--;
+		this._inflightPackets--;
 		var packet = this._outgoing.del(prevAcked+i+1);
 		if (packet && packet.callback) packet.callback();
 	}
@@ -139,17 +145,17 @@ Connection.prototype._sendPacket = function(id, connection, data, callback) {
 
 Connection.prototype._send = function(packet) {
 	var message = packetToBuffer(packet);
-	this._inflight++;
+	this._inflightPackets++;
 	this.socket.send(message, 0, message.length, this.port, this.host);
 };
 
 Connection.prototype._checkTimeout = function() {
-	for (var i = 0; i < this._inflight; i++) {
+	for (var i = 0; i < this._inflightPackets; i++) {
 		var packet = this._outgoing.get(this.seq - i - 1);
 		if (!packet) continue;
 		var now = timestamp();
-		if (uint32(now - packet.timesent) < this._inflightTimeout) continue;
-		packet.timesent = now;
+		if (uint32(now - packet.sent) < this._inflightTimeout) continue;
+		packet.sent = now;
 		this._send(packet);
 		this.emit('packetresend', packet);
 	}
@@ -157,16 +163,18 @@ Connection.prototype._checkTimeout = function() {
 
 Connection.prototype._packet = function(id, connection, data, callback) {
 	var now = timestamp();
+	var seq = this.seq;
+	this.seq = uint16(this.seq+1);
 	return {
 		id: id,
 		connection: connection,
-		timediff: 0,
 		timestamp: now,
-		timesent: now,
-		window: 242424,
-		seq: this.seq++,
+		timediff: 0,
+		window: DEFAULT_WINDOW_SIZE,
+		seq: seq,
 		ack: this.ack,
 		data: data,
+		sent: now,
 		callback: callback
 	};
 };
@@ -177,7 +185,6 @@ Connection.prototype._onsynsent = function(packet) { // when we receive a packet
 	if (packet.id !== ST_STATE) return this._incoming.put(packet.seq, packet);
 	this.emit('connect');
 	this.ack = packet.seq;
-	this._seqAcked = packet.ack-1;
 	this._write = this._writeData;
 	this._recvPacket = this._onconnected;
 	this._recvAck(packet.ack);
@@ -191,7 +198,7 @@ Connection.prototype._onconnected = function(packet) {
 	this._incoming.put(packet.seq, packet);
 	var shouldAck = false;
 	while (packet = this._incoming.del(this.ack+1)) {
-		this.ack++;
+		this.ack = uint16(this.ack+1);
 
 		if (packet.id === ST_DATA) {
 			shouldAck = true;
