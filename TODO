@@ -4,8 +4,10 @@
  ☐ data packet spliting
  ☐ keep-alive / timeouts
  ☐ meassuring window
+ ☐ cluster safety
 
  investigations:
  ☐ naggle algorithm
  ☐ selective ack
  ☐ delayed ack
+ ☐ stun
