@@ -1,10 +1,10 @@
 {
   "name": "utp",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "repository": "git://github.com/mafintosh/utp",
   "description": "utp (micro transport protocol) implementation in node",
   "dependencies": {
-    "circular": "~0.1.0"
+    "cyclist": "~0.1.0"
   },
   "keywords": [
     "utp",

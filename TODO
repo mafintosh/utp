@@ -1,4 +1,4 @@
-0.0.3:
+0.0.4:
  ✔ uint overflow safety @done (13-06-16 04:16)
  ✔ closing using FIN @done (13-06-16 02:15)
  ☐ autoexpand buffers
