@@ -1,7 +1,10 @@
- 0.1.0:
+0.0.3:
  ☐ uint overflow safety
  ✔ closing using FIN @done (13-06-16 02:15)
+ ☐ autoexpand buffers
  ☐ data packet spliting
+
+ 0.1.0:
  ☐ keep-alive / timeouts
  ☐ meassuring window
  ☐ cluster safety
