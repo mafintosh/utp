@@ -15,5 +15,8 @@
     "p2p",
     "udp"
   ],
-  "author": "Mathias Buus Madsen <mathiasbuus@gmail.com>"
+  "author": "Mathias Buus Madsen <mathiasbuus@gmail.com>",
+  "scripts": {
+    "test": "node tests"
+  }
 }
