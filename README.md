@@ -14,8 +14,7 @@ It is currently the main network protocol powering bittorrent.
 
 ## BEWARE BEWARE BEWARE
 
-*This module is far from finished!! So beware of dragons*
-*Things like closing a socket, backpressuare are not implemented yet!*
+*This module is a work in progress! So beware of dragons!*
 
 ## Usage
 
