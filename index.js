@@ -10,16 +10,16 @@ var VERSION   = 1;
 var UINT16    = 0xffff;
 var ID_MASK   = 0xf << 4;
 
-var ST_DATA  = 0 << 4;
-var ST_FIN   = 1 << 4;
-var ST_STATE = 2 << 4;
-var ST_RESET = 3 << 4;
-var ST_SYN   = 4 << 4;
+var PACKET_DATA  = 0 << 4;
+var PACKET_FIN   = 1 << 4;
+var PACKET_STATE = 2 << 4;
+var PACKET_RESET = 3 << 4;
+var PACKET_SYN   = 4 << 4;
 
-var CS_CONNECTING = 1;
-var CS_CONNECTED  = 2;
-var CS_HALF_OPEN  = 3;
-var CS_CLOSED     = 4;
+var CONNECTING = 1;
+var CONNECTED  = 2;
+var HALF_OPEN  = 3;
+var CLOSED     = 4;
 
 var MIN_PACKET_SIZE = 20;
 var DEFAULT_WINDOW_SIZE = 1 << 18;
@@ -91,7 +91,7 @@ var Connection = function(port, host, socket, syn) {
 		this.ack = syn.seq;
 		this.recvId = uint16(syn.connection + 1);
 		this.sendId = syn.connection;
-		this.readyState = CS_CONNECTED;
+		this.readyState = CONNECTED;
 
 		this._sendAck();
 	} else {
@@ -99,13 +99,13 @@ var Connection = function(port, host, socket, syn) {
 		this.ack = 1;
 		this.recvId = 0; // tmp value for v8
 		this.sendId = 0; // tmp value for v8
-		this.readyState = CS_CONNECTING;
+		this.readyState = CONNECTING;
 
 		socket.bind(); // we are iniating this connection since we own the socket
 		socket.on('listening', function() {
 			self.recvId = socket.address().port; // using the port gives us system wide clash protection
 			self.sendId = uint16(self.recvId + 1);
-			self._sendPacket(ST_SYN, self.recvId, null);
+			self._sendPacket(PACKET_SYN, self.recvId, null);
 		});
 		socket.on('error', function(err) {
 			self.emit('error', err);
@@ -119,7 +119,7 @@ var Connection = function(port, host, socket, syn) {
 		if (++tick !== 2) return;
 		if (!syn) setTimeout(socket.close.bind(socket), CLOSE_GRACE);
 		clearInterval(resend);
-		self.readyState = CS_CLOSED;
+		self.readyState = CLOSED;
 		self.emit('close');
 	};
 
@@ -139,20 +139,24 @@ Connection.prototype.destroy = function() {
 	this.end();
 };
 
+Connection.prototype.address = function() {
+	return {port:this.port, address:this.host};
+};
+
 Connection.prototype._read = noop;
 
 Connection.prototype._write = function(data, enc, callback) { // TODO: check size against MTU
-	if (this.readyState === CS_CONNECTING) return this._stack.push(this._write, arguments);
-	this._sendPacket(ST_DATA, this.sendId, data, callback);
+	if (this.readyState === CONNECTING) return this._stack.push(this._write, arguments);
+	this._sendPacket(PACKET_DATA, this.sendId, data, callback);
 };
 
 Connection.prototype._sendFin = function(callback) {
-	if (this.readyState === CS_CONNECTING) return this._stack.push(this._sendFin, arguments);
-	this._sendPacket(ST_FIN, this.sendId, null, callback);
+	if (this.readyState === CONNECTING) return this._stack.push(this._sendFin, arguments);
+	this._sendPacket(PACKET_FIN, this.sendId, null, callback);
 };
 
 Connection.prototype._sendAck = function() {
-	this._send(this._packet(ST_STATE, this.sendId, null, null));
+	this._send(this._packet(PACKET_STATE, this.sendId, null, null));
 };
 
 Connection.prototype._sendPacket = function(id, connection, data, callback) {
@@ -208,7 +212,7 @@ Connection.prototype._packet = function(id, connection, data, callback) {
 Connection.prototype._recvAck = function(seq) { // when we receive an ack
 	var prevAcked = uint16(this.seq - this._inflightPackets - 1); // last packet that was acked
 	var acks = uint16(seq - prevAcked); // amount of acks we just recv
-	if (acks > BUFFER_MAX) return; // sanity check
+	if (acks >= BUFFER_MAX) return; // sanity check
 
 	for (var i = 0; i < acks; i++) {
 		this._inflightPackets--;
@@ -218,13 +222,12 @@ Connection.prototype._recvAck = function(seq) { // when we receive an ack
 };
 
 Connection.prototype._recvPacket = function(packet) { // when we receive a packet
-	if (this.readyState === CS_CLOSED) return;
-	if (this.readyState !== CS_CONNECTING && this._duplicate(packet)) return;
+	if (this.readyState === CLOSED) return;
 
-	if (this.readyState === CS_CONNECTING && packet.id === ST_STATE) {
+	if (this.readyState === CONNECTING && packet.id === PACKET_STATE) { // first ack -> we are connected
 		this.emit('connect');
 		this.ack = packet.seq;
-		this.readyState = CS_CONNECTED;
+		this.readyState = CONNECTED;
 		this._recvAck(packet.ack);
 
 		while (this._stack.length) this._stack.shift().apply(this, this._stack.shift());
@@ -232,36 +235,38 @@ Connection.prototype._recvPacket = function(packet) { // when we receive a packe
 		if (!packet) return;
 	}
 
+	// reorder this packet. TODO: move all this into a ._reorder handler to avoid state check spamming
+	if (this.readyState !== CONNECTING && this._duplicate(packet)) return;
 	this._incoming.put(packet.seq, packet);
-	if (this.readyState === CS_CONNECTING) return;
+	if (this.readyState === CONNECTING) return; // still waiting for the ack
 
 	var shouldAck = false;
 	while (packet = this._incoming.del(this.ack+1)) {
 		this.ack = uint16(this.ack+1);
 
-		if (this.readyState !== CS_CONNECTED) {
+		if (this.readyState !== CONNECTED) { // not connected -> handle everything as PACKET_STATE packets
 			this._recvAck(packet.ack);
 			continue;
 		}
 
 		switch (packet.id) {
-			case ST_DATA:
+			case PACKET_DATA:
 			this.push(packet.data);
 			break;
 
-			case ST_FIN:
-			this.readyState = CS_HALF_OPEN;
+			case PACKET_FIN:
+			this.readyState = HALF_OPEN;
 			this.push(null);
 			break;
 
-			case ST_RESET:
-			this.readyState = CS_CLOSED;
+			case PACKET_RESET:
+			this.readyState = CLOSED;
 			this.push(null);
 			this.end();
 			break;
 		}
 
-		shouldAck = shouldAck || packet.id !== ST_STATE;
+		shouldAck = shouldAck || packet.id !== PACKET_STATE;
 		this._recvAck(packet.ack);
 	}
 
@@ -310,7 +315,7 @@ Server.prototype.listen = function(socket, onlistening) {
 			return;
 		}
 
-		if (packet.id !== ST_SYN) return;
+		if (packet.id !== PACKET_SYN) return;
 
 		connection = new Connection(rinfo.port, rinfo.address, socket, packet);
 		connections[rinfo.address+':'+connection.recvId] = connection;
