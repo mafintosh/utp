@@ -1,5 +1,5 @@
 0.0.3:
- ☐ uint overflow safety
+ ✔ uint overflow safety @done (13-06-16 04:16)
  ✔ closing using FIN @done (13-06-16 02:15)
  ☐ autoexpand buffers
  ☐ data packet spliting
@@ -14,3 +14,4 @@
  ☐ selective ack
  ☐ delayed ack
  ☐ stun
+ ☐ benchmark parsing
