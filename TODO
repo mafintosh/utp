@@ -1,6 +1,6 @@
  0.1.0:
  ☐ uint overflow safety
- ☐ closing using FIN
+ ✔ closing using FIN @done (13-06-16 02:15)
  ☐ data packet spliting
  ☐ keep-alive / timeouts
  ☐ meassuring window
