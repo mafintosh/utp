@@ -16,7 +16,9 @@ var ST_STATE = 2 << 4;
 var ST_RESET = 3 << 4;
 var ST_SYN   = 4 << 4;
 
+var MIN_PACKET_SIZE = 20;
 var DEFAULT_WINDOW_SIZE = 1 << 18;
+var CLOSE_GRACE = 5000;
 
 var uint32 = function(n) {
 	return n >>> 0;
@@ -75,15 +77,14 @@ var Connection = function(port, host, socket, syn) {
 	this._incoming = cyclist(64);
 	this._inflightPackets = 0;
 	this._inflightTimeout = 500000;
-	this._stack = [];
+	this._stack = null;
 
 	if (syn) {
 		this.seq = (Math.random() * UINT16) | 0;
 		this.ack = syn.seq;
-		this.recvId = syn.connection + 1;
+		this.recvId = uint16(syn.connection + 1);
 		this.sendId = syn.connection;
 
-		this._write = this._writeData;
 		this._recvPacket = this._onconnected;
 		this._sendAck();
 	} else {
@@ -92,18 +93,38 @@ var Connection = function(port, host, socket, syn) {
 		this.recvId = 0; // tmp value for v8
 		this.sendId = 0; // tmp value for v8
 
-		this._write = this._writeBuffer;
+		this._stack = [];
 		this._recvPacket = this._onsynsent;
 
-		socket.bind(); // we are iniating this connection so we own the socket
+		socket.bind(); // we are iniating this connection since we own the socket
 		socket.on('listening', function() {
 			self.recvId = socket.address().port; // using the port gives us system wide clash protection
-			self.sendId = self.recvId + 1;
+			self.sendId = uint16(self.recvId + 1);
 			self._sendPacket(ST_SYN, self.recvId, null);
+		});
+		socket.on('error', function(err) {
+			self.emit('error', err);
 		});
 	}
 
-	setInterval(this._checkTimeout.bind(this), 500);
+	var resend = setInterval(this._checkTimeout.bind(this), 500);
+
+	var tick = 0;
+	var closed = function() {
+		if (++tick !== 2) return;
+		if (!syn) setTimeout(socket.close.bind(socket), CLOSE_GRACE);
+		clearInterval(resend);
+		self.emit('close');
+	};
+
+	this.on('finish', function() {
+		self._sendFin(function() {
+			process.nextTick(closed);
+		});
+	});
+	this.on('end', function() {
+		process.nextTick(closed);
+	});
 };
 
 Connection.prototype.__proto__ = Duplex.prototype;
@@ -112,12 +133,13 @@ Connection.prototype.__proto__ = Duplex.prototype;
 
 Connection.prototype._read = noop;
 
-Connection.prototype._writeBuffer = function(data, enc, callback) {
-	this._stack.push(arguments);
+Connection.prototype._write = function(data, enc, callback) { // TODO: check size against MTU
+	if (this._stack) return this._stack.push(this._write, arguments); // must be connected
+	this._sendPacket(ST_DATA, this.sendId, data, callback);
 };
 
-Connection.prototype._writeData = function(data, enc, callback) { // TODO: check size against MTU
-	this._sendPacket(ST_DATA, this.sendId, data, callback);
+Connection.prototype.destroy = function() {
+	this.end();
 };
 
 // utp stuff
@@ -131,6 +153,11 @@ Connection.prototype._recvAck = function(seq) { // when we receive an ack
 		var packet = this._outgoing.del(prevAcked+i+1);
 		if (packet && packet.callback) packet.callback();
 	}
+};
+
+Connection.prototype._sendFin = function(callback) {
+	if (this._stack) return this._stack.push(this._sendFin, arguments); // must be connected
+	this._sendPacket(ST_FIN, this.sendId, null, callback);
 };
 
 Connection.prototype._sendAck = function() {
@@ -183,12 +210,16 @@ Connection.prototype._packet = function(id, connection, data, callback) {
 
 Connection.prototype._onsynsent = function(packet) { // when we receive a packet
 	if (packet.id !== ST_STATE) return this._incoming.put(packet.seq, packet);
+
 	this.emit('connect');
 	this.ack = packet.seq;
-	this._write = this._writeData;
 	this._recvPacket = this._onconnected;
 	this._recvAck(packet.ack);
-	while (this._stack.length) this._writeData.apply(this, this._stack.shift());
+
+	var stack = this._stack;
+	this._stack = null;
+	while (stack.length) stack.shift().apply(this, stack.shift());
+
 	packet = this._incoming.del(this.ack+1);
 	if (packet) this._recvPacket(packet);
 };
@@ -204,11 +235,22 @@ Connection.prototype._onconnected = function(packet) {
 			shouldAck = true;
 			this.push(packet.data);
 		}
+		if (packet.id === ST_FIN || packet.id === ST_RESET) {
+			shouldAck = true;
+			this._recvPacket = this._onfinrecv;
+			this.push(null);
+			if (packet.id === ST_RESET) this.end();
+			break;
+		}
 
 		this._recvAck(packet.ack);
 	}
 
 	if (shouldAck) this._sendAck();
+};
+
+Connection.prototype._onfinrecv = function(packet) {
+	this._recvAck(packet.ack);
 };
 
 var Server = function() {
@@ -226,8 +268,8 @@ Server.prototype.listen = function(socket, onlistening) {
 	if (typeof socket !== 'object') {
 		var port = socket;
 		socket = dgram.createSocket('udp4');
-		socket.bind(port)
-		return this.listen(socket);
+		socket.bind(port);
+		return this.listen(socket, onlistening);
 	}
 
 	var self = this;
@@ -238,23 +280,29 @@ Server.prototype.listen = function(socket, onlistening) {
 	socket.on('listening', function() {
 		self.emit('listening');
 	});
+	socket.on('error', function(err) {
+		self.emit('error', err);
+	});
 
 	socket.on('message', function(message, rinfo) {
+		if (message.length < MIN_PACKET_SIZE) return;
 		var packet = bufferToPacket(message);
-		var prefix = rinfo.address+':';
-		var conn = connections[prefix+packet.connection];
+		var connection = connections[rinfo.address+':'+packet.connection];
 
-		if (conn) {
-			conn.port = rinfo.port; // do know if port can change when behind routers - investigate
-			conn._recvPacket(packet);
+		if (connection) {
+			connection.port = rinfo.port; // do know if port can change when behind routers - investigate
+			connection._recvPacket(packet);
 			return;
 		}
 
 		if (packet.id !== ST_SYN) return;
 
-		conn = new Connection(rinfo.port, rinfo.address, socket, packet);
-		connections[prefix+conn.recvId] = conn;
-		self.emit('connection', conn);
+		connection = new Connection(rinfo.port, rinfo.address, socket, packet);
+		connections[rinfo.address+':'+connection.recvId] = connection;
+		connection.on('close', function() {
+			delete connections[rinfo.address+':'+connection.recvId];
+		});
+		self.emit('connection', connection);
 	});
 
 	if (onlistening) this.on('listening', onlistening);
@@ -271,6 +319,7 @@ exports.connect = function(port, host) {
 	var conn = new Connection(port, host || 'localhost', socket, null);
 
 	socket.on('message', function(message) {
+		if (message.length < MIN_PACKET_SIZE) return;
 		conn._recvPacket(bufferToPacket(message));
 	});
 
