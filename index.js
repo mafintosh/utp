@@ -80,7 +80,7 @@ var Connection = function(port, host, socket, syn) {
 	this.host = host;
 	this.socket = socket;
 
-	this._outgoing = cyclist(BUFFER_MAX); // TODO: set to 2 and and grow if needed until BUFFER_MAX
+	this._outgoing = cyclist(BUFFER_MAX);
 	this._incoming = cyclist(BUFFER_MAX);
 	this._inflightPackets = 0;
 	this._inflightTimeout = 500000;
@@ -146,12 +146,12 @@ Connection.prototype.address = function() {
 Connection.prototype._read = noop;
 
 Connection.prototype._write = function(data, enc, callback) { // TODO: check size against MTU
-	if (this.readyState === CONNECTING) return this._stack.push(this._write, arguments);
+	if (this.readyState === CONNECTING) return this._stack.push(this._write.bind(this, data, enc, callback));
 	this._sendPacket(PACKET_DATA, this.sendId, data, callback);
 };
 
 Connection.prototype._sendFin = function(callback) {
-	if (this.readyState === CONNECTING) return this._stack.push(this._sendFin, arguments);
+	if (this.readyState === CONNECTING) return this._stack.push(this._sendFin.bind(this, callback));
 	this._sendPacket(PACKET_FIN, this.sendId, null, callback);
 };
 
@@ -183,14 +183,6 @@ Connection.prototype._checkTimeout = function() {
 	}
 };
 
-Connection.prototype._duplicate = function(packet) {
-	if (uint16(packet.seq - this.ack) >= BUFFER_MAX) {
-		this._sendAck(); // this is an duplicate packet - lets just ack it
-		return true;
-	}
-	return false;
-};
-
 Connection.prototype._packet = function(id, connection, data, callback) {
 	var now = timestamp();
 	var seq = this.seq;
@@ -209,7 +201,7 @@ Connection.prototype._packet = function(id, connection, data, callback) {
 	};
 };
 
-Connection.prototype._recvAck = function(seq) { // when we receive an ack
+Connection.prototype._recvAck = function(seq) {
 	var prevAcked = uint16(this.seq - this._inflightPackets - 1); // last packet that was acked
 	var acks = uint16(seq - prevAcked); // amount of acks we just recv
 	if (acks >= BUFFER_MAX) return; // sanity check
@@ -221,49 +213,47 @@ Connection.prototype._recvAck = function(seq) { // when we receive an ack
 	}
 };
 
-Connection.prototype._recvPacket = function(packet) { // when we receive a packet
+Connection.prototype._recvPacket = function(packet) {
 	if (this.readyState === CLOSED) return;
 
-	if (this.readyState === CONNECTING && packet.id === PACKET_STATE) { // first ack -> we are connected
+	if (this.readyState === CONNECTING) {
+		if (packet.id !== PACKET_STATE) return this._incoming.put(packet.seq, packet);
+
 		this.emit('connect');
 		this.ack = packet.seq;
 		this.readyState = CONNECTED;
 		this._recvAck(packet.ack);
 
-		while (this._stack.length) this._stack.shift().apply(this, this._stack.shift());
+		while (this._stack.length) this._stack.shift()();
 		packet = this._incoming.del(this.ack+1);
 		if (!packet) return;
 	}
 
-	// reorder this packet. TODO: move all this into a ._reorder handler to avoid state check spamming
-	if (this.readyState !== CONNECTING && this._duplicate(packet)) return;
+	if (uint16(packet.seq - this.ack) >= BUFFER_MAX) return this._sendAck(); // old packet
 	this._incoming.put(packet.seq, packet);
-	if (this.readyState === CONNECTING) return; // still waiting for the ack
 
 	var shouldAck = false;
 	while (packet = this._incoming.del(this.ack+1)) {
-		this.ack = uint16(this.ack+1);
+		if (packet.seq !== uint16(this.ack+1)) break; // sanity check
+
+		this.ack = packet.seq;
 
 		if (this.readyState !== CONNECTED) { // not connected -> handle everything as PACKET_STATE packets
 			this._recvAck(packet.ack);
 			continue;
 		}
 
-		switch (packet.id) {
-			case PACKET_DATA:
+		if (packet.id === PACKET_DATA) {
 			this.push(packet.data);
-			break;
-
-			case PACKET_FIN:
+		}
+		if (packet.id === PACKET_FIN) {
 			this.readyState = HALF_OPEN;
 			this.push(null);
-			break;
-
-			case PACKET_RESET:
+		}
+		if (packet.id === PACKET_RESET) {
 			this.readyState = CLOSED;
 			this.push(null);
 			this.end();
-			break;
 		}
 
 		shouldAck = shouldAck || packet.id !== PACKET_STATE;
@@ -307,20 +297,21 @@ Server.prototype.listen = function(socket, onlistening) {
 	socket.on('message', function(message, rinfo) {
 		if (message.length < MIN_PACKET_SIZE) return;
 		var packet = bufferToPacket(message);
-		var connection = connections[rinfo.address+':'+packet.connection];
+		var id = rinfo.address+':'+(packet.id === PACKET_SYN ? uint16(packet.connection+1) : packet.connection);
+		var connection = connections[id];
 
 		if (connection) {
+			if (packet.id === PACKET_SYN) return;
 			connection.port = rinfo.port; // do know if port can change when behind routers - investigate
 			connection._recvPacket(packet);
 			return;
 		}
-
 		if (packet.id !== PACKET_SYN) return;
 
 		connection = new Connection(rinfo.port, rinfo.address, socket, packet);
-		connections[rinfo.address+':'+connection.recvId] = connection;
+		connections[id] = connection;
 		connection.on('close', function() {
-			delete connections[rinfo.address+':'+connection.recvId];
+			delete connections[id];
 		});
 		self.emit('connection', connection);
 	});
@@ -336,7 +327,7 @@ exports.createServer = function(onconnection) {
 
 exports.connect = function(port, host) {
 	var socket = dgram.createSocket('udp4');
-	var conn = new Connection(port, host || 'localhost', socket, null);
+	var conn = new Connection(port, host || '127.0.0.1', socket, null);
 
 	socket.on('message', function(message) {
 		if (message.length < MIN_PACKET_SIZE) return;
