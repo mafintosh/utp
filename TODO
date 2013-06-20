@@ -5,6 +5,7 @@
 
 0.0.5:
  ☐ buffer overflow fixes
+ ☐ state packets should NOT inc seq_nr (see docs)
 
 0.1.0:
  ☐ keep-alive / timeouts
