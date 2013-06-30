@@ -83,41 +83,44 @@ var Connection = function(port, host, socket, syn) {
 
 	this._outgoing = cyclist(BUFFER_SIZE);
 	this._incoming = cyclist(BUFFER_SIZE);
+
 	this._inflightPackets = 0;
-	this._inflightBytes = 0;
-	this._inflightTimeout = 500000;
 	this._stack = [];
 	this._ondrain = noop;
 
 	if (syn) {
-		this.seq = (Math.random() * UINT16) | 0;
-		this.ack = syn.seq;
-		this.recvId = uint16(syn.connection + 1);
-		this.sendId = syn.connection;
-		this.readyState = CONNECTED;
+		this._state = CONNECTED;
+		this._recvId = uint16(syn.connection+1);
+		this._sendId = syn.connection;
+		this._seq = (Math.random() * UINT16) | 0;
+		this._ack = syn.seq;
+		this._synack = this._packet(PACKET_STATE, null);
 
-		this._sendAck();
+		this._send(this._synack);
 	} else {
-		this.seq = 1;
-		this.ack = 1;
-		this.recvId = 0; // tmp value for v8
-		this.sendId = 0; // tmp value for v8
-		this.readyState = CONNECTING;
+		this._state = CONNECTING;
+		this._recvId = 0; // tmp value for v8 opt
+		this._sendId = 0; // tmp value for v8 opt
+		this._seq = (Math.random() * UINT16) | 0;
+		this._ack = 0;
+		this._synack = null;
 
-		socket.bind(); // we are iniating this connection since we own the socket
 		socket.on('listening', function() {
-			self.recvId = socket.address().port; // using the port gives us system wide clash protection
-			self.sendId = uint16(self.recvId + 1);
-			self._sendPacket(PACKET_SYN, self.recvId, null);
+			self._recvId = socket.address().port; // using the port gives us system wide clash protection
+			self._sendId = uint16(self._recvId + 1);
+			self._sendOutgoing(self._packet(PACKET_SYN, null));
 		});
+
 		socket.on('error', function(err) {
 			self.emit('error', err);
 		});
+
+		socket.bind();
 	}
 
-	var resend = setInterval(this._checkTimeout.bind(this), 500);
-
+	var resend = setInterval(this._checkTimeouts.bind(this), 500);
 	var tick = 0;
+
 	var closed = function() {
 		if (++tick !== 2) return;
 		if (!syn) setTimeout(socket.close.bind(socket), CLOSE_GRACE);
@@ -126,12 +129,13 @@ var Connection = function(port, host, socket, syn) {
 		self.emit('close');
 	};
 
-	this.on('finish', function() {
-		self._sendFin(function() {
+	this.once('finish', function() {
+		self._end(function() {
 			process.nextTick(closed);
 		});
 	});
-	this.on('end', function() {
+
+	this.once('end', function() {
 		process.nextTick(closed);
 	});
 };
@@ -149,52 +153,106 @@ Connection.prototype.address = function() {
 Connection.prototype._read = noop;
 
 Connection.prototype._write = function(data, enc, callback) {
-	if (this.readyState === CONNECTING) return this._stack.push(this._write.bind(this, data, enc, callback));
+	if (this._state === CONNECTING) return this._stack.push(this._write.bind(this, data, enc, callback));
 
-	for (var i = 0; i < data.length; i += MTU) {
-		var flushed = this._sendPacket(PACKET_DATA, this.sendId, data.slice(i, i+MTU), null);
-		if (flushed) continue;
-		this._ondrain = i+MTU < data.length ? this._write.bind(this, data.slice(i+MTU), enc, callback) : callback;
+	if (data.length <= MTU) {
+		if (this._writeData(data)) return callback();
+		this._ondrain = this._write.bind(this, data, enc, callback);
+		return;
+	}
+
+	for (var i = 0; i < data.length; i+= MTU) {
+		if (this._writeData(data.slice(i, i+MTU))) continue;
+		this._ondrain = this._write.bind(this, data.slice(i), enc, callback);
 		return;
 	}
 
 	callback();
 };
 
-Connection.prototype._sendFin = function(callback) {
-	if (this.readyState === CONNECTING) return this._stack.push(this._sendFin.bind(this, callback));
-	this._sendPacket(PACKET_FIN, this.sendId, null, callback);
+Connection.prototype._writeData = function(data) {
+	if (this._inflightPackets >= BUFFER_SIZE-1) return false;
+	this._sendOutgoing(this._packet(PACKET_DATA, data));
+	return true;
+};
+
+Connection.prototype._end = function(callback) {
+	if (this._state === CONNECTING) return this._stack.push(this._end.bind(this, callback));
+	this._sendOutgoing(this._packet(PACKET_FIN, null));
+	this._ondrain = callback;
+};
+
+Connection.prototype._recvAck = function(ack) {
+	var offset = this._seq - this._inflightPackets;
+	var acked = uint16(ack - offset)+1;
+
+	if (acked >= BUFFER_SIZE) return; // sanity check
+
+	for (var i = 0; i < acked; i++) {
+		this._outgoing.del(offset+i);
+		this._inflightPackets--;
+	}
+
+	if (this._inflightPackets) return;
+
+	process.nextTick(this._ondrain);
+	this._ondrain = noop;
 };
 
 Connection.prototype._sendAck = function() {
-	this._sendPacket(PACKET_STATE, this.sendId, null, null);
+	this._send(this._packet(PACKET_STATE, null)); // TODO: make this delayed
 };
 
-Connection.prototype._sendPacket = function(id, connection, data, callback) {
-	var now = timestamp();
-	var seq = this.seq;
-	this.seq = uint16(this.seq+1);
+Connection.prototype._recvIncoming = function(packet) {
+	if (this._state === CLOSED) return;
+	if (this._state === CONNECTED && packet.id === PACKET_SYN) return this._send(this._synack);
+	if (this._state === CONNECTING) {
+		if (packet.id !== PACKET_STATE) return this._incoming.put(packet.seq, packet);
 
-	var packet = {
-		id: id,
-		connection: connection,
-		timestamp: now,
-		timediff: 0,
-		window: DEFAULT_WINDOW_SIZE,
-		seq: seq,
-		ack: this.ack,
-		data: data,
-		sent: now,
-		callback: callback
-	};
+		this.emit('connect');
+		this._ack = uint16(packet.seq-1);
+		this._recvAck(packet.ack);
+		this._state = CONNECTED;
 
-	if (id !== PACKET_STATE) this._outgoing.put(packet.seq, packet);
-	if (data) this._inflightBytes += data.length;
+		while (this._stack.length) this._stack.shift()();
 
+		packet = this._incoming.del(packet.seq);
+		if (!packet) return;
+	}
+
+	if (uint16(packet.seq - this._ack) >= BUFFER_SIZE) return this._sendAck(); // old packet
+
+	this._recvAck(packet.ack); // TODO: other calcs as well
+
+	if (packet.id === PACKET_STATE) return;
+	if (packet.id === PACKET_RESET) {
+		this.readyState = CLOSED;
+		this.push(null);
+		this.end();
+		return this._sendAck();
+	}
+
+	this._incoming.put(packet.seq, packet);
+
+	while (packet = this._incoming.del(this._ack+1)) {
+		this._ack = uint16(this._ack+1);
+
+		if (packet.id === PACKET_DATA) {
+			this.push(packet.data);
+		}
+		if (packet.id === PACKET_FIN) {
+			this.push(null);
+		}
+	}
+
+	this._sendAck();
+};
+
+Connection.prototype._sendOutgoing = function(packet) {
+	this._outgoing.put(packet.seq, packet);
+	this._seq = uint16(this._seq + 1);
 	this._inflightPackets++;
 	this._send(packet);
-
-	return this._inflightBytes < DEFAULT_WINDOW_SIZE || this._inflightPackets < BUFFER_SIZE-10;
 };
 
 Connection.prototype._send = function(packet) {
@@ -202,139 +260,68 @@ Connection.prototype._send = function(packet) {
 	this.socket.send(message, 0, message.length, this.port, this.host);
 };
 
-Connection.prototype._checkTimeout = function() {
-	for (var i = 0; i < this._inflightPackets; i++) {
-		var packet = this._outgoing.get(this.seq - i - 1);
-		if (!packet) continue;
-		var now = timestamp();
-		if (uint32(now - packet.sent) < this._inflightTimeout) continue;
-		packet.sent = now;
-		this._send(packet);
-	}
+Connection.prototype._checkTimeouts = function() {
+	var first = this._outgoing.get(this._seq - this._inflightPackets);
+	if (!first) return;
+	if (!first.timeouts++) return;
+	this._send(first);
 };
 
-Connection.prototype._recvAck = function(seq) {
-	var prevAcked = uint16(this.seq - this._inflightPackets - 1); // last packet that was acked
-	var acks = uint16(seq - prevAcked); // amount of acks we just recv
-	if (acks >= BUFFER_SIZE) return; // sanity check
-
-	for (var i = 0; i < acks; i++) {
-		this._inflightPackets--;
-		var packet = this._outgoing.del(prevAcked+i+1);
-		if (packet && packet.data) this._inflightBytes -= packet.data.length;
-		if (packet && packet.callback) packet.callback();
-	}
-
-	if (!this._inflightBytes) {
-		process.nextTick(this._ondrain);
-		this._ondrain = noop;
-	}
-};
-
-Connection.prototype._recvPacket = function(packet) {
-	if (this.readyState === CLOSED) return;
-
-	if (this.readyState === CONNECTING) {
-		if (packet.id !== PACKET_STATE) return this._incoming.put(packet.seq, packet);
-
-		this.emit('connect');
-		this.ack = packet.seq;
-		this.readyState = CONNECTED;
-		this._recvAck(packet.ack);
-
-		while (this._stack.length) this._stack.shift()();
-		packet = this._incoming.del(this.ack+1);
-		if (!packet) return;
-	}
-
-	if (uint16(packet.seq - this.ack) >= BUFFER_SIZE) return this._sendAck(); // old packet
-	this._incoming.put(packet.seq, packet);
-
-	var shouldAck = false;
-	while (packet = this._incoming.del(this.ack+1)) {
-		if (packet.seq !== uint16(this.ack+1)) break; // sanity check
-
-		this.ack = packet.seq;
-
-		if (this.readyState !== CONNECTED) { // not connected -> handle everything as PACKET_STATE packets
-			this._recvAck(packet.ack);
-			continue;
-		}
-
-		if (packet.id === PACKET_DATA) {
-			this.push(packet.data);
-		}
-		if (packet.id === PACKET_FIN) {
-			this.readyState = HALF_OPEN;
-			this.push(null);
-		}
-		if (packet.id === PACKET_RESET) {
-			this.readyState = CLOSED;
-			this.push(null);
-			this.end();
-		}
-
-		shouldAck = shouldAck || packet.id !== PACKET_STATE;
-		this._recvAck(packet.ack);
-	}
-
-	if (shouldAck) this._sendAck();
+Connection.prototype._packet = function(id, data) {
+	var now = timestamp();
+	return {
+		id: id,
+		connection: id === PACKET_SYN ? this._recvId : this._sendId,
+		seq: this._seq,
+		ack: this._ack,
+		timestamp: now,
+		timediff: 0,
+		window: DEFAULT_WINDOW_SIZE,
+		data: data,
+		timeouts: 0
+	};
 };
 
 var Server = function() {
 	EventEmitter.call(this);
-	this.socket = null;
+	this._socket = null;
+	this._connections = {};
 };
 
 Server.prototype.__proto__ = EventEmitter.prototype;
 
 Server.prototype.address = function() {
-	return this.socket && this.socket.address();
+	return this.socket.address();
 };
 
-Server.prototype.listen = function(socket, onlistening) {
-	if (typeof socket !== 'object') {
-		var port = socket;
-		socket = dgram.createSocket('udp4');
-		socket.bind(port);
-		return this.listen(socket, onlistening);
-	}
-
+Server.prototype.listen = function(port, onlistening) {
+	var socket = this._socket = dgram.createSocket('udp4');
+	var connections = this._connections;
 	var self = this;
-	var connections = {};
-
-	this.socket = socket;
-
-	socket.on('listening', function() {
-		self.emit('listening');
-	});
-	socket.on('error', function(err) {
-		self.emit('error', err);
-	});
 
 	socket.on('message', function(message, rinfo) {
 		if (message.length < MIN_PACKET_SIZE) return;
 		var packet = bufferToPacket(message);
 		var id = rinfo.address+':'+(packet.id === PACKET_SYN ? uint16(packet.connection+1) : packet.connection);
-		var connection = connections[id];
 
-		if (connection) {
-			if (packet.id === PACKET_SYN) return;
-			connection.port = rinfo.port; // do know if port can change when behind routers - investigate
-			connection._recvPacket(packet);
-			return;
-		}
+		if (connections[id]) return connections[id]._recvIncoming(packet);
 		if (packet.id !== PACKET_SYN) return;
 
-		connection = new Connection(rinfo.port, rinfo.address, socket, packet);
-		connections[id] = connection;
-		connection.on('close', function() {
+		connections[id] = new Connection(rinfo.port, rinfo.host, socket, packet);
+		connections[id].on('close', function() {
 			delete connections[id];
 		});
-		self.emit('connection', connection);
+
+		self.emit('connection', connections[id]);
 	});
 
-	if (onlistening) this.on('listening', onlistening);
+	socket.once('listening', function() {
+		self.emit('listening');
+	});
+
+	if (onlistening) self.once('listening', onlistening);
+
+	socket.bind(port);
 };
 
 exports.createServer = function(onconnection) {
@@ -345,12 +332,17 @@ exports.createServer = function(onconnection) {
 
 exports.connect = function(port, host) {
 	var socket = dgram.createSocket('udp4');
-	var conn = new Connection(port, host || '127.0.0.1', socket, null);
+	var connection = new Connection(port, host || '127.0.0.1', socket, null);
 
 	socket.on('message', function(message) {
 		if (message.length < MIN_PACKET_SIZE) return;
-		conn._recvPacket(bufferToPacket(message));
+		var packet = bufferToPacket(message);
+
+		if (packet.id === PACKET_SYN) return;
+		if (packet.connection !== connection._recvId) return;
+
+		connection._recvIncoming(packet);
 	});
 
-	return conn;
+	return connection;
 };
