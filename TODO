@@ -5,12 +5,11 @@
 
 0.0.5:
  ☐ buffer overflow fixes
- ☐ state packets should NOT inc seq_nr (see docs)
+ ✔ state packets should NOT inc seq_nr (see docs) @done (13-07-01 07:12)
 
 0.1.0:
  ☐ keep-alive / timeouts
- ☐ meassuring window
- ☐ cluster safety
+ ☐ complete protocol minus LEDBAT
 
 investigations:
  ☐ naggle algorithm
