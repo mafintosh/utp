@@ -261,10 +261,15 @@ Connection.prototype._send = function(packet) {
 };
 
 Connection.prototype._checkTimeouts = function() {
-	var first = this._outgoing.get(this._seq - this._inflightPackets);
+	var offset = this._seq - this._inflightPackets;
+	var first = this._outgoing.get(offset);
 	if (!first) return;
 	if (!first.timeouts++) return;
-	this._send(first);
+	for (var i = 0; i < this._inflightPackets; i++) {
+		var packet = this._outgoing.get(offset+i);
+		packet.timeouts = first.timeouts;
+		this._send(packet);
+	}
 };
 
 Connection.prototype._packet = function(id, data) {

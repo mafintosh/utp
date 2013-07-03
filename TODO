@@ -4,7 +4,7 @@
  ✔ data packet spliting @done (13-06-20 23:43)
 
 0.0.5:
- ☐ buffer overflow fixes
+ ✔ buffer overflow fixes @done (13-07-03 21:15)
  ✔ state packets should NOT inc seq_nr (see docs) @done (13-07-01 07:12)
 
 0.1.0:
