@@ -3,8 +3,6 @@ var cyclist = require('cyclist');
 var EventEmitter = require('events').EventEmitter;
 var Duplex = require('stream').Duplex;
 
-var noop = function() {};
-
 var EXTENSION = 0;
 var VERSION   = 1;
 var UINT16    = 0xffff;
@@ -16,11 +14,6 @@ var PACKET_FIN   = 1 << 4;
 var PACKET_STATE = 2 << 4;
 var PACKET_RESET = 3 << 4;
 var PACKET_SYN   = 4 << 4;
-
-var CONNECTING = 1;
-var CONNECTED  = 2;
-var HALF_OPEN  = 3;
-var CLOSED     = 4;
 
 var MIN_PACKET_SIZE = 20;
 var DEFAULT_WINDOW_SIZE = 1 << 18;
@@ -73,6 +66,20 @@ var packetToBuffer = function(packet) {
 	return buffer;
 };
 
+var createPacket = function(connection, id, data) {
+	return {
+		id: id,
+		connection: id === PACKET_SYN ? connection._recvId : connection._sendId,
+		seq: connection._seq,
+		ack: connection._ack,
+		timestamp: timestamp(),
+		timediff: 0,
+		window: DEFAULT_WINDOW_SIZE,
+		data: data,
+		transmissions: 0
+	};
+};
+
 var Connection = function(port, host, socket, syn) {
 	Duplex.call(this);
 	var self = this;
@@ -85,20 +92,19 @@ var Connection = function(port, host, socket, syn) {
 	this._incoming = cyclist(BUFFER_SIZE);
 
 	this._inflightPackets = 0;
-	this._stack = [];
-	this._ondrain = noop;
+	this._closed = false;
 
 	if (syn) {
-		this._state = CONNECTED;
+		this._connecting = false;
 		this._recvId = uint16(syn.connection+1);
 		this._sendId = syn.connection;
 		this._seq = (Math.random() * UINT16) | 0;
 		this._ack = syn.seq;
-		this._synack = this._packet(PACKET_STATE, null);
+		this._synack = createPacket(this, PACKET_STATE, null);
 
-		this._send(this._synack);
+		this._transmit(this._synack);
 	} else {
-		this._state = CONNECTING;
+		this._connecting = true;
 		this._recvId = 0; // tmp value for v8 opt
 		this._sendId = 0; // tmp value for v8 opt
 		this._seq = (Math.random() * UINT16) | 0;
@@ -108,7 +114,7 @@ var Connection = function(port, host, socket, syn) {
 		socket.on('listening', function() {
 			self._recvId = socket.address().port; // using the port gives us system wide clash protection
 			self._sendId = uint16(self._recvId + 1);
-			self._sendOutgoing(self._packet(PACKET_SYN, null));
+			self._sendOutgoing(createPacket(self, PACKET_SYN, null));
 		});
 
 		socket.on('error', function(err) {
@@ -118,23 +124,24 @@ var Connection = function(port, host, socket, syn) {
 		socket.bind();
 	}
 
-	var resend = setInterval(this._checkTimeouts.bind(this), 500);
+	var resend = setInterval(this._flush.bind(this), 500);
 	var tick = 0;
 
 	var closed = function() {
-		if (++tick !== 2) return;
-		if (!syn) setTimeout(socket.close.bind(socket), CLOSE_GRACE);
-		clearInterval(resend);
-		self.readyState = CLOSED;
-		self.emit('close');
+		if (++tick === 2) self._closing();
 	};
 
-	this.once('finish', function() {
-		self._end(function() {
-			process.nextTick(closed);
-		});
-	});
+	var sendFin = function() {
+		if (self._connecting) return self.once('connect', sendFin);
+		self._sendOutgoing(createPacket(self, PACKET_FIN, null));
+		self.once('flush', closed);
+	};
 
+	this.once('finish', sendFin);
+	this.once('close', function() {
+		if (!syn) setTimeout(socket.close.bind(socket), CLOSE_GRACE);
+		clearInterval(resend);
+	});
 	this.once('end', function() {
 		process.nextTick(closed);
 	});
@@ -150,37 +157,57 @@ Connection.prototype.address = function() {
 	return {port:this.port, address:this.host};
 };
 
-Connection.prototype._read = noop;
+Connection.prototype._read = function() {
+	// do nothing...
+};
 
 Connection.prototype._write = function(data, enc, callback) {
-	if (this._state === CONNECTING) return this._stack.push(this._write.bind(this, data, enc, callback));
+	if (this._connecting) return this._writeOnce('connect', data, enc, callback);
 
-	if (data.length <= MTU) {
-		if (this._writeData(data)) return callback();
-		this._ondrain = this._write.bind(this, data, enc, callback);
-		return;
+	while (this._writable()) {
+		var payload = this._payload(data);
+
+		this._sendOutgoing(createPacket(this, PACKET_DATA, payload));
+
+		if (payload.length === data.length) return callback();
+		data = data.slice(payload.length);
 	}
 
-	for (var i = 0; i < data.length; i+= MTU) {
-		if (this._writeData(data.slice(i, i+MTU))) continue;
-		this._ondrain = this._write.bind(this, data.slice(i), enc, callback);
-		return;
+	this._writeOnce('flush', data, enc, callback);
+};
+
+Connection.prototype._writeOnce = function(event, data, enc, callback) {
+	this.once(event, function() {
+		this._write(data, enc, callback);
+	});
+};
+
+Connection.prototype._writable = function() {
+	return this._inflightPackets < BUFFER_SIZE-1;
+};
+
+Connection.prototype._payload = function(data) {
+	if (data.length > MTU) return data.slice(0, MTU);
+	return data;
+};
+
+Connection.prototype._flush = function() {
+	var offset = this._seq - this._inflightPackets;
+	var now = timestamp();
+
+	for (var i = 0; i < this._inflightPackets; i++) {
+		var packet = this._outgoing.get(offset+i);
+		if (uint32(now - packet.timestamp) >= 500000 * packet.transmissions) this._transmit(packet);
 	}
-
-	callback();
 };
 
-Connection.prototype._writeData = function(data) {
-	if (this._inflightPackets >= BUFFER_SIZE-1) return false;
-	this._sendOutgoing(this._packet(PACKET_DATA, data));
-	return true;
+Connection.prototype._closing = function() {
+	if (this._closed) return;
+	this._closed = true;
+	process.nextTick(this.emit.bind(this, 'close'));
 };
 
-Connection.prototype._end = function(callback) {
-	if (this._state === CONNECTING) return this._stack.push(this._end.bind(this, callback));
-	this._sendOutgoing(this._packet(PACKET_FIN, null));
-	this._ondrain = callback;
-};
+// packet handling
 
 Connection.prototype._recvAck = function(ack) {
 	var offset = this._seq - this._inflightPackets;
@@ -193,28 +220,29 @@ Connection.prototype._recvAck = function(ack) {
 		this._inflightPackets--;
 	}
 
-	if (this._inflightPackets) return;
-
-	process.nextTick(this._ondrain);
-	this._ondrain = noop;
-};
-
-Connection.prototype._sendAck = function() {
-	this._send(this._packet(PACKET_STATE, null)); // TODO: make this delayed
+	if (!this._inflightPackets) this.emit('flush');
 };
 
 Connection.prototype._recvIncoming = function(packet) {
-	if (this._state === CLOSED) return;
-	if (this._state === CONNECTED && packet.id === PACKET_SYN) return this._send(this._synack);
-	if (this._state === CONNECTING) {
+	if (this._closed) return;
+
+	if (packet.id === PACKET_SYN && this._connecting) {
+		this._transmit(this._synack);
+		return;
+	}
+	if (packet.id === PACKET_RESET) {
+		this.push(null);
+		this.end();
+		this._closing();
+		return;
+	}
+	if (this._connecting) {
 		if (packet.id !== PACKET_STATE) return this._incoming.put(packet.seq, packet);
 
-		this.emit('connect');
 		this._ack = uint16(packet.seq-1);
 		this._recvAck(packet.ack);
-		this._state = CONNECTED;
-
-		while (this._stack.length) this._stack.shift()();
+		this._connecting = false;
+		this.emit('connect');
 
 		packet = this._incoming.del(packet.seq);
 		if (!packet) return;
@@ -225,67 +253,35 @@ Connection.prototype._recvIncoming = function(packet) {
 	this._recvAck(packet.ack); // TODO: other calcs as well
 
 	if (packet.id === PACKET_STATE) return;
-	if (packet.id === PACKET_RESET) {
-		this.readyState = CLOSED;
-		this.push(null);
-		this.end();
-		return this._sendAck();
-	}
-
 	this._incoming.put(packet.seq, packet);
 
 	while (packet = this._incoming.del(this._ack+1)) {
 		this._ack = uint16(this._ack+1);
 
-		if (packet.id === PACKET_DATA) {
-			this.push(packet.data);
-		}
-		if (packet.id === PACKET_FIN) {
-			this.push(null);
-		}
+		if (packet.id === PACKET_DATA) this.push(packet.data);
+		if (packet.id === PACKET_FIN)  this.push(null);
 	}
 
 	this._sendAck();
+};
+
+Connection.prototype._sendAck = function() {
+	this._transmit(createPacket(this, PACKET_STATE, null)); // TODO: make this delayed
 };
 
 Connection.prototype._sendOutgoing = function(packet) {
 	this._outgoing.put(packet.seq, packet);
 	this._seq = uint16(this._seq + 1);
 	this._inflightPackets++;
-	this._send(packet);
+	this._transmit(packet);
 };
 
-Connection.prototype._send = function(packet) {
+Connection.prototype._transmit = function(packet) {
+	packet.transmissions++;
 	var message = packetToBuffer(packet);
 	this.socket.send(message, 0, message.length, this.port, this.host);
 };
 
-Connection.prototype._checkTimeouts = function() {
-	var offset = this._seq - this._inflightPackets;
-	var first = this._outgoing.get(offset);
-	if (!first) return;
-	if (!first.timeouts++) return;
-	for (var i = 0; i < this._inflightPackets; i++) {
-		var packet = this._outgoing.get(offset+i);
-		packet.timeouts = first.timeouts;
-		this._send(packet);
-	}
-};
-
-Connection.prototype._packet = function(id, data) {
-	var now = timestamp();
-	return {
-		id: id,
-		connection: id === PACKET_SYN ? this._recvId : this._sendId,
-		seq: this._seq,
-		ack: this._ack,
-		timestamp: now,
-		timediff: 0,
-		window: DEFAULT_WINDOW_SIZE,
-		data: data,
-		timeouts: 0
-	};
-};
 
 var Server = function() {
 	EventEmitter.call(this);
@@ -312,7 +308,7 @@ Server.prototype.listen = function(port, onlistening) {
 		if (connections[id]) return connections[id]._recvIncoming(packet);
 		if (packet.id !== PACKET_SYN) return;
 
-		connections[id] = new Connection(rinfo.port, rinfo.host, socket, packet);
+		connections[id] = new Connection(rinfo.port, rinfo.address, socket, packet);
 		connections[id].on('close', function() {
 			delete connections[id];
 		});
