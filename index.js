@@ -1,5 +1,6 @@
 var dgram = require('dgram');
 var cyclist = require('cyclist');
+var util = require('util');
 var EventEmitter = require('events').EventEmitter;
 var Duplex = require('stream').Duplex;
 
@@ -76,7 +77,7 @@ var createPacket = function(connection, id, data) {
 		timediff: 0,
 		window: DEFAULT_WINDOW_SIZE,
 		data: data,
-		transmissions: 0
+		sent: 0
 	};
 };
 
@@ -93,6 +94,7 @@ var Connection = function(port, host, socket, syn) {
 
 	this._inflightPackets = 0;
 	this._closed = false;
+	this._alive = false;
 
 	if (syn) {
 		this._connecting = false;
@@ -124,7 +126,8 @@ var Connection = function(port, host, socket, syn) {
 		socket.bind();
 	}
 
-	var resend = setInterval(this._flush.bind(this), 500);
+	var resend = setInterval(this._resend.bind(this), 500);
+	var keepAlive = setInterval(this._keepAlive.bind(this), 10*1000);
 	var tick = 0;
 
 	var closed = function() {
@@ -141,13 +144,18 @@ var Connection = function(port, host, socket, syn) {
 	this.once('close', function() {
 		if (!syn) setTimeout(socket.close.bind(socket), CLOSE_GRACE);
 		clearInterval(resend);
+		clearInterval(keepAlive);
 	});
 	this.once('end', function() {
 		process.nextTick(closed);
 	});
 };
 
-Connection.prototype.__proto__ = Duplex.prototype;
+util.inherits(Connection, Duplex);
+
+Connection.prototype.setTimeout = function() {
+	// TODO: impl me
+};
 
 Connection.prototype.destroy = function() {
 	this.end();
@@ -191,14 +199,25 @@ Connection.prototype._payload = function(data) {
 	return data;
 };
 
-Connection.prototype._flush = function() {
+Connection.prototype._resend = function() {
 	var offset = this._seq - this._inflightPackets;
+	var first = this._outgoing.get(offset);
+	if (!first) return;
+
+	var timeout = 500000;
 	var now = timestamp();
+
+	if (uint32(first.sent - now) < timeout) return;
 
 	for (var i = 0; i < this._inflightPackets; i++) {
 		var packet = this._outgoing.get(offset+i);
-		if (uint32(now - packet.timestamp) >= 500000 * packet.transmissions) this._transmit(packet);
+		if (uint32(packet.sent - now) >= timeout) this._transmit(packet);
 	}
+};
+
+Connection.prototype._keepAlive = function() {
+	if (this._alive) return this._alive = false;
+	this._sendAck();
 };
 
 Connection.prototype._closing = function() {
@@ -277,8 +296,9 @@ Connection.prototype._sendOutgoing = function(packet) {
 };
 
 Connection.prototype._transmit = function(packet) {
-	packet.transmissions++;
+	packet.sent = packet.sent === 0 ? packet.timestamp : timestamp();
 	var message = packetToBuffer(packet);
+	this._alive = true;
 	this.socket.send(message, 0, message.length, this.port, this.host);
 };
 
@@ -289,7 +309,7 @@ var Server = function() {
 	this._connections = {};
 };
 
-Server.prototype.__proto__ = EventEmitter.prototype;
+util.inherits(Server, EventEmitter);
 
 Server.prototype.address = function() {
 	return this.socket.address();
