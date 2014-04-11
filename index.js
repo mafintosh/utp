@@ -312,7 +312,7 @@ var Server = function() {
 util.inherits(Server, EventEmitter);
 
 Server.prototype.address = function() {
-	return this.socket.address();
+	return this._socket.address();
 };
 
 Server.prototype.listen = function(port, onlistening) {
