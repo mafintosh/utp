@@ -25,7 +25,7 @@ var utp = require('utp');
 
 var server = utp.createServer(function(socket) {
 	console.log('new connection!');
-	client.on('data', function(data) {
+	socket.on('data', function(data) {
 		console.log('client says '+data);
 	});
 });
