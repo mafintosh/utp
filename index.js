@@ -91,6 +91,7 @@ var Connection = function(port, host, socket, syn) {
 
 	this._outgoing = cyclist(BUFFER_SIZE);
 	this._incoming = cyclist(BUFFER_SIZE);
+	this._closed = false;
 
 	this._inflightPackets = 0;
 	this._closed = false;
@@ -327,7 +328,7 @@ Server.prototype.listenSocket = function(socket, onlistening) {
 		var id = rinfo.address+':'+(packet.id === PACKET_SYN ? uint16(packet.connection+1) : packet.connection);
 
 		if (connections[id]) return connections[id]._recvIncoming(packet);
-		if (packet.id !== PACKET_SYN) return;
+		if (packet.id !== PACKET_SYN || self._closed) return;
 
 		connections[id] = new Connection(rinfo.port, rinfo.address, socket, packet);
 		connections[id].on('close', function() {
@@ -351,19 +352,24 @@ Server.prototype.listen = function(port, onlistening) {
 	socket.bind(port);
 };
 
-Server.prototype.close = function(onclose) {
-  var open_connections = 0;
+Server.prototype.close = function(cb) {
+	var self = this;
+	var openConnections = 0;
+	this._closed = true;
 
-  function onClose() {
-    if (--open_connections === 0) onclose();
-  }
+	function onClose() {
+		if (--openConnections === 0) {
+			if (self._socket) self._socket.close();
+			if (cb) cb();
+		}
+	}
 
-  for (var id in this._connections) {
-    if (this._connections[id]._closed) continue;
-    ++open_connections;
-    this._connections[id].once('close', onClose);
-    this._connections[id].end();
-  }
+	for (var id in this._connections) {
+		if (this._connections[id]._closed) continue;
+		openConnections++;
+		this._connections[id].once('close', onClose);
+		this._connections[id].end();
+	}
 };
 
 exports.createServer = function(onconnection) {
