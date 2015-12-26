@@ -1,6 +1,7 @@
 {
   "name": "utp",
   "version": "0.0.9",
+  "main": "src/index.js",
   "repository": "git://github.com/mafintosh/utp",
   "description": "utp (micro transport protocol) implementation in node",
   "dependencies": {
@@ -16,7 +17,15 @@
     "udp"
   ],
   "author": "Mathias Buus Madsen <mathiasbuus@gmail.com>",
+  "contributors": [
+    "David Dias <daviddias@ipfs.io> http://daviddias.me"
+  ],
   "scripts": {
-    "test": "node tests"
+    "test": "node tests",
+    "lint": "standard"
+  },
+  "devDependencies": {
+    "pre-commit": "^1.1.2",
+    "standard": "^5.4.1"
   }
 }
