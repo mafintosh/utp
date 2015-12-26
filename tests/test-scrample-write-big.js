@@ -1,6 +1,6 @@
 require('./scrample');
 
-var utp = require('../index');
+var utp = require('../src');
 var assert = require('assert');
 
 var big = new Buffer(10*1024);

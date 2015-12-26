@@ -1,4 +1,4 @@
-var utp = require('../index');
+var utp = require('../src');
 var assert = require('assert');
 var max = 1000;
 
