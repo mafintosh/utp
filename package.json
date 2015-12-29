@@ -5,7 +5,8 @@
   "repository": "git://github.com/mafintosh/utp",
   "description": "utp (micro transport protocol) implementation in node",
   "dependencies": {
-    "cyclist": "~0.1.0"
+    "cyclist": "~0.1.0",
+    "nexpect": "^0.5.0"
   },
   "keywords": [
     "utp",
@@ -23,7 +24,9 @@
   "scripts": {
     "lint": "standard",
     "coverage": "istanbul cover --print both -- _mocha tests/test-*.js",
-    "test": "mocha tests/test-*.js"
+    "test": "mocha tests/test-*.js",
+    "test:interop-setup": "./tests/setup-interop-test.sh",
+    "test:interop": "mocha tests/interop-test-*.js"
   },
   "devDependencies": {
     "chai": "^3.4.1",
