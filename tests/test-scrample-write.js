@@ -83,7 +83,7 @@ describe('scrample-write', function () {
   })
 
   it('big', function (done) {
-    this.timeout(5000)
+    this.timeout(50000)
     var big = new Buffer(10 * 1024)
     big.fill(1)
 
