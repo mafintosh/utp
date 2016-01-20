@@ -1,0 +1,26 @@
+{
+  "name": "utp",
+  "version": "0.0.0",
+  "description": "utp javascript implementation",
+  "main": "index.js",
+  "scripts": {
+    "test": "standard && tape test/*.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mafintosh/utp.git"
+  },
+  "author": [
+    "Mathias Buus (@mafintosh)",
+    "David Dias (@diasdavid)"
+  ],
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/mafintosh/utp/issues"
+  },
+  "homepage": "https://github.com/mafintosh/utp",
+  "devDependencies": {
+    "standard": "^5.4.1",
+    "tape": "^4.4.0"
+  }
+}
