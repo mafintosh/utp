@@ -20,6 +20,7 @@
   },
   "homepage": "https://github.com/mafintosh/utp",
   "devDependencies": {
+    "speedometer": "^1.0.0",
     "standard": "^5.4.1",
     "tape": "^4.4.0"
   }
