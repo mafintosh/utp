@@ -1,9 +1,11 @@
 # utp
 
-utp (micro transport protocol) implementation in node.
+> utp (micro transport protocol) implementation in node.
 It is available through npm
 
 	npm install utp
+
+[![js-standard-style](https://cdn.rawgit.com/feross/standard/master/badge.svg)](https://github.com/feross/standard)
 
 ## What is utp?
 
