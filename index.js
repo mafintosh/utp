@@ -3,6 +3,7 @@ var cyclist = require('cyclist');
 var util = require('util');
 var EventEmitter = require('events').EventEmitter;
 var Duplex = require('stream').Duplex;
+var bufferAlloc = require('buffer-alloc');
 
 var EXTENSION = 0;
 var VERSION   = 1;
@@ -54,7 +55,7 @@ var bufferToPacket = function(buffer) {
 };
 
 var packetToBuffer = function(packet) {
-	var buffer = new Buffer(20 + (packet.data ? packet.data.length : 0));
+	var buffer = bufferAlloc(20 + (packet.data ? packet.data.length : 0));
 	buffer[0] = packet.id | VERSION;
 	buffer[1] = EXTENSION;
 	buffer.writeUInt16BE(packet.connection, 2);

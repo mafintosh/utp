@@ -2,8 +2,9 @@ require('./scrample');
 
 var utp = require('../index');
 var assert = require('assert');
+var bufferAlloc = require('buffer-alloc');
 
-var big = new Buffer(10*1024);
+var big = bufferAlloc(10*1024);
 big.fill(1);
 
 utp.createServer(function(socket) {
