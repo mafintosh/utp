@@ -1,6 +1,6 @@
 {
   "name": "utp",
-  "version": "0.0.9",
+  "version": "0.0.10",
   "repository": "git://github.com/mafintosh/utp",
   "description": "utp (micro transport protocol) implementation in node",
   "dependencies": {
