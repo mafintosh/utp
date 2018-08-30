@@ -245,20 +245,23 @@ Connection.prototype._recvAck = function(ack) {
 };
 
 Connection.prototype._recvIncoming = function(packet) {
-	if (this._closed) return;
+	if (this._closed) return false;
 
 	if (packet.id === PACKET_SYN && this._connecting) {
 		this._transmit(this._synack);
-		return;
+		return true;
 	}
 	if (packet.id === PACKET_RESET) {
 		this.push(null);
 		this.end();
 		this._closing();
-		return;
+		return true;
 	}
 	if (this._connecting) {
-		if (packet.id !== PACKET_STATE) return this._incoming.put(packet.seq, packet);
+		if (packet.id !== PACKET_STATE) {
+			this._incoming.put(packet.seq, packet);
+			return true
+		}
 
 		this._ack = uint16(packet.seq-1);
 		this._recvAck(packet.ack);
@@ -266,14 +269,17 @@ Connection.prototype._recvIncoming = function(packet) {
 		this.emit('connect');
 
 		packet = this._incoming.del(packet.seq);
-		if (!packet) return;
+		if (!packet) return false;
 	}
 
-	if (uint16(packet.seq - this._ack) >= BUFFER_SIZE) return this._sendAck(); // old packet
+	if (uint16(packet.seq - this._ack) >= BUFFER_SIZE) {
+		this._sendAck(); // old packet
+		return true
+	}
 
 	this._recvAck(packet.ack); // TODO: other calcs as well
 
-	if (packet.id === PACKET_STATE) return;
+	if (packet.id === PACKET_STATE) return true;
 	this._incoming.put(packet.seq, packet);
 
 	while (packet = this._incoming.del(this._ack+1)) {
@@ -284,6 +290,7 @@ Connection.prototype._recvIncoming = function(packet) {
 	}
 
 	this._sendAck();
+	return true
 };
 
 Connection.prototype._sendAck = function() {
@@ -324,12 +331,23 @@ Server.prototype.listenSocket = function(socket, onlistening) {
 	var self = this;
 
 	socket.on('message', function(message, rinfo) {
-		if (message.length < MIN_PACKET_SIZE) return;
+		self.emit('message', message, rinfo)
+		if (message.length < MIN_PACKET_SIZE) {
+			self.emit('message', message, rinfo)
+			return
+		}
+
 		var packet = bufferToPacket(message);
+
 		var id = rinfo.address+':'+(packet.id === PACKET_SYN ? uint16(packet.connection+1) : packet.connection);
 
-		if (connections[id]) return connections[id]._recvIncoming(packet);
-		if (packet.id !== PACKET_SYN || self._closed) return;
+		if (connections[id]) {
+			if (!connections[id]._recvIncoming(packet)) {
+				return self.emit('message', message, rinfo)
+			}
+		}
+
+		if (packet.id !== PACKET_SYN || self._closed) return self.emit('message', message, rinfo);
 
 		connections[id] = new Connection(rinfo.port, rinfo.address, socket, packet);
 		connections[id].on('close', function() {
@@ -344,6 +362,11 @@ Server.prototype.listenSocket = function(socket, onlistening) {
 	});
 
 	if (onlistening) self.once('listening', onlistening);
+}
+
+
+Server.prototype.send = function(buffer, offset, length, port, host, cb) {
+	this._socket.send(buffer, offset, length, port, host, cb)
 }
 
 Server.prototype.listen = function(port, onlistening) {
@@ -373,17 +396,24 @@ Server.prototype.close = function(cb) {
 	}
 };
 
-exports.createServer = function(onconnection) {
+
+function Utp() {
+	return new Server();
+}
+
+util.inherits(Utp, EventEmitter);
+
+Utp.createServer = function(onconnection) {
 	var server = new Server();
 	if (onconnection) server.on('connection', onconnection);
 	return server;
 };
 
-exports.connect = function(port, host) {
+Utp.connect = function(port, host) {
 	var socket = dgram.createSocket('udp4');
 	var connection = new Connection(port, host || '127.0.0.1', socket, null);
 
-	socket.on('message', function(message) {
+	socket.on('message', function(message, rinfo) {
 		if (message.length < MIN_PACKET_SIZE) return;
 		var packet = bufferToPacket(message);
 
@@ -395,3 +425,30 @@ exports.connect = function(port, host) {
 
 	return connection;
 };
+
+Server.prototype.connect = function(port, host) {
+	var self = this;
+
+	var socket = dgram.createSocket('udp4');
+	var connection = new Connection(port, host || '127.0.0.1', socket, null);
+
+	socket.on('message', function(message, rinfo) {
+		function e() {
+			self.emit('message', message, rinfo)
+		}
+		if (message.length < MIN_PACKET_SIZE) return e();
+		var packet = bufferToPacket(message);
+
+		if (packet.id === PACKET_SYN) return;
+		if (packet.connection !== connection._recvId) return e();
+
+		var handled = connection._recvIncoming(packet);
+		if (!handled) e()
+	});
+
+	return connection;
+};
+
+
+
+module.exports = Utp 

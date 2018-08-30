@@ -5,7 +5,11 @@
   "description": "utp (micro transport protocol) implementation in node",
   "dependencies": {
     "buffer-alloc": "^1.1.0",
+    "chrome-dgram": "^3.0.1",
     "cyclist": "~0.1.0"
+  },
+  "browser": {
+    "dgram": "chrome-dgram"
   },
   "keywords": [
     "utp",
