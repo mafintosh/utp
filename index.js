@@ -343,8 +343,9 @@ Server.prototype.listenSocket = function(socket, onlistening) {
 
 		if (connections[id]) {
 			if (!connections[id]._recvIncoming(packet)) {
-				return self.emit('message', message, rinfo)
+				self.emit('message', message, rinfo)
 			}
+			return
 		}
 
 		if (packet.id !== PACKET_SYN || self._closed) return self.emit('message', message, rinfo);
