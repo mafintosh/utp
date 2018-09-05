@@ -280,9 +280,12 @@ Connection.prototype._recvIncoming = function(packet) {
 	this._recvAck(packet.ack); // TODO: other calcs as well
 
 	if (packet.id === PACKET_STATE) return true;
+
+	if (uint16(packet.seq - this._ack) > BUFFER_SIZE) return true;
 	this._incoming.put(packet.seq, packet);
 
 	while (packet = this._incoming.del(this._ack+1)) {
+		if (uint16(packet.seq - this._ack) !== 1) break;
 		this._ack = uint16(this._ack+1);
 
 		if (packet.id === PACKET_DATA) this.push(packet.data);
