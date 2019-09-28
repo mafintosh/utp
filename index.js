@@ -159,10 +159,6 @@ Connection.prototype.setTimeout = function() {
 	// TODO: impl me
 };
 
-Connection.prototype.destroy = function() {
-	this.end();
-};
-
 Connection.prototype.address = function() {
 	return {port:this.port, address:this.host};
 };
@@ -358,10 +354,16 @@ Server.prototype.close = function(cb) {
 	var openConnections = 0;
 	this._closed = true;
 
+	function connectionsClosed() {
+		if (self._socket) {
+			self._socket.close();
+		}
+		if (cb) cb();
+	}
+
 	function onClose() {
 		if (--openConnections === 0) {
-			if (self._socket) self._socket.close();
-			if (cb) cb();
+			connectionsClosed();
 		}
 	}
 
@@ -369,8 +371,13 @@ Server.prototype.close = function(cb) {
 		if (this._connections[id]._closed) continue;
 		openConnections++;
 		this._connections[id].once('close', onClose);
-		this._connections[id].end();
+		this._connections[id].destroy();
 	}
+
+	if (openConnections === 0) {
+		connectionsClosed();
+	}
+
 };
 
 exports.createServer = function(onconnection) {
